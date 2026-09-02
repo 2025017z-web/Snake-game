@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>SNAKE GAME - NEON SLITHER</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050812;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #gameCanvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            z-index: 1;
+        }
+    </style>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+    (function() {
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const FIELD_WIDTH = 3500;
+        const FIELD_HEIGHT = 3500;
+
+        let mouseX = 0, mouseY = 0;
+        let isMouseDown = false;
+        let isDashButtonPressed = false;
+        let dashTouchId = null;
+
+        // --- プレイヤー名の初回設定・ローカルストレージ保存 ---
+        let myPlayerName = localStorage.getItem('snake_player_name');
+        if (!myPlayerName) {
+            myPlayerName = prompt("表示名（プレイヤー名）を入力してください:", "Player_" + Math.floor(Math.random() * 1000));
+            if (!myPlayerName || myPlayerName.trim() === "") {
+                myPlayerName = "Player_" + Math.floor(Math.random() * 1000);
+            }
+            localStorage.setItem('snake_player_name', myPlayerName);
+        }
+
+        // ゲーム状態 & モード
+        let gameState = "HOME"; 
+        let gameMode = "OFFLINE"; 
+
+        let score = 0;
+        if (window.totalCoins === undefined) window.totalCoins = 200;
+        if (window.unlockedSkins === undefined) window.unlockedSkins = [0];
+        let currentSkinIdx = 0;
+
+        let gachaState = "IDLE";
+        let gachaAnimTimer = 0;
+        let gachaPulledSkinIdx = -1;
+        let gachaText = "";
+        let gachaParticles = [];
+        let isPremiumKakutei = false;
+
+        // Socket.IO
+        let socket = null;
+        let onlinePlayers = {};
+
+        // Web Audio API
+        let audioCtx = null;
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playSound(type) {
+            if (!audioCtx) return;
+            try {
+                let osc = audioCtx.createOscillator();
+                let gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                let now = audioCtx.currentTime;
+
+                if (type === 'food') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(500, now);
+                    osc.frequency.exponentialRampToValueAtTime(850, now + 0.08);
+                    gain.gain.setValueAtTime(0.12, now);
+                    gain.gain.linearRampToValueAtTime(0, now + 0.08);
+                    osc.start(now); osc.stop(now + 0.08);
+                } else if (type === 'box') {
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(400, now);
+                    osc.frequency.setValueAtTime(600, now + 0.06);
+                    osc.frequency.setValueAtTime(900, now + 0.12);
+                    gain.gain.setValueAtTime(0.1, now);
+                    gain.gain.linearRampToValueAtTime(0, now + 0.25);
+                    osc.start(now); osc.stop(now + 0.25);
+                } else if (type === 'dash') {
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(150, now);
+                    osc.frequency.linearRampToValueAtTime(300, now + 0.1);
+                    gain.gain.setValueAtTime(0.04, now);
+                    gain.gain.linearRampToValueAtTime(0, now + 0.1);
+                    osc.start(now); osc.stop(now + 0.1);
+                } else if (type === 'kill' || type === 'gacha_open') {
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(440, now);
+                    osc.frequency.exponentialRampToValueAtTime(1200, now + 0.3);
+                    gain.gain.setValueAtTime(0.15, now); gain.gain.linearRampToValueAtTime(0, now + 0.3);
+                    osc.start(now); osc.stop(now + 0.3);
+                } else if (type === 'gameover') {
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(300, now);
+                    osc.frequency.linearRampToValueAtTime(80, now + 0.6);
+                    gain.gain.setValueAtTime(0.2, now); gain.gain.linearRampToValueAtTime(0, now + 0.6);
+                    osc.start(now); osc.stop(now + 0.6);
+                }
+            } catch(e){}
+        }
+
+        let skinTemplates = [
+            { name: "NEON MINT", head: "#4ffaef", body: "#3cd0c4", glow: "#aaffff", pattern: "plain", accessory: "none", weight: 150 },
+            { name: "CANDY PINK", head: "#ff7da7", body: "#e65c87", glow: "#ffb3cc", pattern: "plain", accessory: "none", weight: 60 },
+            { name: "CYBER BLUE", head: "#4facfe", body: "#0066ff", glow: "#a0c8ff", pattern: "plain", accessory: "none", weight: 60 },
+            { name: "SUNSET ORANGE", head: "#ffb347", body: "#ffcc33", glow: "#ffe0b3", pattern: "plain", accessory: "none", weight: 60 },
+            { name: "WATERMELON", head: "#22aa44", body: "#ff3355", glow: "#44ff44", pattern: "watermelon", accessory: "none", weight: 30 },
+            { name: "ZEBRA STRIPE", head: "#ffffff", body: "#1a1a1a", glow: "#ffffff", pattern: "zebra", accessory: "none", weight: 25 },
+            { name: "GOLDEN KING", head: "#ffd700", body: "#b8860b", glow: "#fff8dc", pattern: "plain", accessory: "crown", weight: 5 },
+            { name: "GALAXY RAINBOW", head: "rainbow", body: "rainbow", glow: "#ffffff", pattern: "plain", accessory: "crown", weight: 10 }
+        ];
+
+        let snake = [];
+        let enemies = [];
+        let foods = [];
+        let boxes = [];
+        let numFoods = 400;
+        let numEnemies = 9;
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        window.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        });
+
+        function getDashButtonRadius() { return 45; }
+        function getDashButtonCenter() { return { x: canvas.width - 70, y: canvas.height - 210 }; }
+
+        function checkDashButton(x, y) {
+            if (gameState !== "PLAYING") return false;
+            let btn = getDashButtonCenter();
+            return Math.hypot(x - btn.x, y - btn.y) < getDashButtonRadius();
+        }
+
+        canvas.addEventListener('mousedown', (e) => {
+            initAudio();
+            if (checkDashButton(e.clientX, e.clientY)) {
+                isDashButtonPressed = true;
+            } else {
+                isMouseDown = true;
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            isMouseDown = false;
+            isDashButtonPressed = false;
+        });
+
+        canvas.addEventListener('click', (e) => {
+            initAudio();
+            let cx = canvas.width / 2;
+            let cy = canvas.height / 2;
+
+            if (checkDashButton(e.clientX, e.clientY)) return;
+
+            if (gameState === "HOME") {
+                // 名前変更領域
+                if (e.clientX > cx - 140 && e.clientX < cx + 140 && e.clientY > cy - 80 && e.clientY < cy - 50) {
+                    let newName = prompt("新しい表示名を入力:", myPlayerName);
+                    if (newName && newName.trim() !== "") {
+                        myPlayerName = newName.trim();
+                        localStorage.setItem('snake_player_name', myPlayerName);
+                    }
+                }
+                // スキン選択
+                else if (e.clientX > cx - 140 && e.clientX < cx + 140 && e.clientY > cy - 35 && e.clientY < cy + 10) {
+                    let startidx = currentSkinIdx;
+                    do {
+                        currentSkinIdx = (currentSkinIdx + 1) % skinTemplates.length;
+                    } while (!window.unlockedSkins.includes(currentSkinIdx) && currentSkinIdx !== startidx);
+                }
+                // オフラインモード
+                else if (e.clientX > cx - 140 && e.clientX < cx + 140 && e.clientY > cy + 90 && e.clientY < cy + 135) {
+                    gameMode = "OFFLINE";
+                    initGame();
+                    gameState = "PLAYING";
+                }
+                // オンライン対戦モード
+                else if (e.clientX > cx - 140 && e.clientX < cx + 140 && e.clientY > cy + 150 && e.clientY < cy + 195) {
+                    gameMode = "ONLINE";
+                    initSocketConnection();
+                    initGame();
+                    gameState = "PLAYING";
+                }
+            } else if (gameState === "GAMEOVER") {
+                gameState = "HOME";
+            }
+        });
+
+        function initSocketConnection() {
+            if (socket) return;
+            try {
+                socket = io();
+                socket.on('connect', () => {
+                    socket.emit('joinGame', { name: myPlayerName, skinIdx: currentSkinIdx });
+                });
+                socket.on('stateUpdate', (data) => {
+                    if (data.players) onlinePlayers = data.players;
+                    if (data.foods) foods = data.foods;
+                });
+            } catch (err) {
+                console.log("Socket connection error:", err);
+            }
+        }
+
+        function initGame() {
+            score = 0;
+            let startX = Math.random() * (FIELD_WIDTH - 400) + 200;
+            let startY = Math.random() * (FIELD_HEIGHT - 400) + 200;
+            snake = [];
+            for (let i = 0; i < 20; i++) {
+                snake.push({ x: startX - i * 8, y: startY });
+            }
+
+            foods = [];
+            if (gameMode === "OFFLINE") {
+                enemies = [];
+                for (let i = 0; i < numEnemies; i++) {
+                    enemies.push(spawnSmartEnemy(true, i));
+                }
+                for (let i = 0; i < numFoods; i++) {
+                    foods.push(createNewFood());
+                }
+            } else {
+                // ONLINE時はCOM（Bot）プレイヤーも混ざる構成
+                enemies = [];
+                for (let i = 0; i < 5; i++) {
+                    enemies.push(spawnSmartEnemy(false, i, true)); // COMフラグ立て
+                }
+                for (let i = 0; i < numFoods; i++) {
+                    foods.push(createNewFood());
+                }
+            }
+        }
+
+        function createNewFood(x, y, col) {
+            return {
+                x: x !== undefined ? x : Math.random() * FIELD_WIDTH,
+                y: y !== undefined ? y : Math.random() * FIELD_HEIGHT,
+                r: Math.random() * 2 + 4,
+                col: col !== undefined ? col : `hsl(${Math.random() * 360}, 100%, 75%)`
+            };
+        }
+
+        let enemyNamesBase = ["Slither_Master", "Viper_X", "Cyber_Snake", "Shadow_Tail", "Neon_Hunter"];
+
+        function spawnSmartEnemy(isBoss = false, index = 0, isCOM = false) {
+            let rx = Math.random() * FIELD_WIDTH;
+            let ry = Math.random() * FIELD_HEIGHT;
+            let nameTag = isCOM ? `[com] ${enemyNamesBase[index % enemyNamesBase.length]}` : enemyNamesBase[index % enemyNamesBase.length];
+            return {
+                name: nameTag,
+                body: Array.from({ length: 25 }, () => ({ x: rx, y: ry })),
+                angle: Math.random() * Math.PI * 2,
+                speed: 2.5,
+                col: `hsl(${Math.random() * 360}, 90%, 65%)`,
+                glow: `hsl(${Math.random() * 360}, 100%, 80%)`,
+                enemyScore: Math.floor(Math.random() * 300)
+            };
+        }
+
+        function getRainbowColor(offset = 0) {
+            let t = (Date.now() / 10 + offset) % 360;
+            return `hsl(${t}, 100%, 70%)`;
+        }
+
+        function drawHomeScreen() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            let cx = canvas.width / 2;
+            let cy = canvas.height / 2;
+
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = "#4ffaef";
+            ctx.fillStyle = "#4ffaef";
+            ctx.font = "bold 42px sans-serif";
+            ctx.fillText("🐍 NEON SNAKE GAME", cx, cy - 130);
+
+            // プレイヤー名表示・変更エリア
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 18px sans-serif";
+            ctx.fillText(`👤 名前: ${myPlayerName} (クリックで変更)`, cx, cy - 65);
+
+            // スキン選択
+            ctx.fillStyle = "rgba(20, 25, 40, 0.85)";
+            ctx.fillRect(cx - 140, cy - 35, 280, 45);
+            let currentSkin = skinTemplates[currentSkinIdx];
+            ctx.fillStyle = currentSkin.head === "rainbow" ? getRainbowColor() : currentSkin.head;
+            ctx.font = "bold 15px sans-serif";
+            ctx.fillText(`< SKIN: ${currentSkin.name} >`, cx, cy - 12);
+
+            // スタートボタン
+            ctx.fillStyle = "#4ffaef";
+            ctx.fillRect(cx - 140, cy + 90, 280, 45);
+            ctx.fillStyle = "#101524";
+            ctx.font = "bold 17px sans-serif";
+            ctx.fillText("🤖 練習 (AIソロモード)", cx, cy + 112);
+
+            ctx.fillStyle = "#ff7da7";
+            ctx.fillRect(cx - 140, cy + 150, 280, 45);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 17px sans-serif";
+            ctx.fillText("🌐 オンラインリアルタイム対戦", cx, cy + 172);
+        }
+
+        function updateAndDrawGameplay() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            let head = snake[0];
+            let camX = canvas.width / 2 - head.x;
+            let camY = canvas.height / 2 - head.y;
+
+            let thicknessMultiplier = 1 + Math.min(score / 4500, 1.6);
+            let headRadius = 13 * thicknessMultiplier;
+            let bodyRadius = 8 * thicknessMultiplier;
+
+            // マップ枠
+            ctx.strokeStyle = "rgba(79, 250, 239, 0.25)";
+            ctx.lineWidth = 6;
+            ctx.strokeRect(camX, camY, FIELD_WIDTH, FIELD_HEIGHT);
+
+            // エサ描画
+            foods.forEach(f => {
+                ctx.fillStyle = f.col;
+                ctx.beginPath();
+                ctx.arc(f.x + camX, f.y + camY, f.r, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // 自分の移動
+            let targetX = mouseX - (canvas.width / 2);
+            let targetY = mouseY - (canvas.height / 2);
+            let playerAngle = Math.atan2(targetY, targetX);
+            let pSpeed = (isMouseDown || isDashButtonPressed) && snake.length > 8 ? 7.0 : 4.0;
+
+            let nextPX = head.x + Math.cos(playerAngle) * pSpeed;
+            let nextPY = head.y + Math.sin(playerAngle) * pSpeed;
+
+            // 壁衝突
+            if (nextPX < 0 || nextPX > FIELD_WIDTH || nextPY < 0 || nextPY > FIELD_HEIGHT) {
+                playSound('gameover');
+                gameState = "GAMEOVER";
+                return;
+            }
+
+            snake.unshift({ x: nextPX, y: nextPY });
+            snake.pop();
+
+            // オンライン座標送信
+            if (gameMode === "ONLINE" && socket && socket.connected) {
+                socket.emit('playerMove', {
+                    name: myPlayerName,
+                    x: nextPX, y: nextPY,
+                    angle: playerAngle,
+                    score: score,
+                    skinIdx: currentSkinIdx,
+                    snake: snake
+                });
+            }
+
+            // エサ判定
+            for (let i = foods.length - 1; i >= 0; i--) {
+                if (Math.hypot(nextPX - foods[i].x, nextPY - foods[i].y) < headRadius + foods[i].r) {
+                    playSound('food');
+                    score += 10;
+                    snake.push({ x: snake[snake.length - 1].x, y: snake[snake.length - 1].y });
+                    foods.splice(i, 1);
+                    if (gameMode === "OFFLINE") foods.push(createNewFood());
+                }
+            }
+
+            let playerDied = false;
+
+            // 他オンラインプレイヤーの描画と衝突判定（★同じ場所でのバトル判定）
+            if (gameMode === "ONLINE") {
+                Object.keys(onlinePlayers).forEach(pId => {
+                    if (pId !== socket?.id) {
+                        let other = onlinePlayers[pId];
+                        if (other.snake && other.snake.length > 0) {
+                            // 相手ヘビの描画
+                            let oSkin = skinTemplates[other.skinIdx || 0];
+                            for (let s = other.snake.length - 1; s >= 0; s--) {
+                                ctx.fillStyle = s === 0 ? oSkin.head : oSkin.body;
+                                ctx.beginPath();
+                                ctx.arc(other.snake[s].x + camX, other.snake[s].y + camY, s === 0 ? 13 : 8, 0, Math.PI * 2);
+                                ctx.fill();
+
+                                // 相手の胴体に自分の頭がぶつかったら自分が死亡
+                                if (s > 0) {
+                                    let dist = Math.hypot(head.x - other.snake[s].x, head.y - other.snake[s].y);
+                                    if (dist < headRadius * 0.8 + 8 * 0.8) {
+                                        playerDied = true;
+                                    }
+                                }
+                            }
+
+                            // 相手の名前タグ描画
+                            ctx.fillStyle = "#ffffff";
+                            ctx.font = "bold 12px sans-serif";
+                            ctx.textAlign = "center";
+                            ctx.fillText(other.name || "Player", other.snake[0].x + camX, other.snake[0].y + camY - 20);
+                        }
+                    }
+                });
+            }
+
+            // COM敵の描画と判定
+            enemies.forEach(enemy => {
+                let eHead = enemy.body[0];
+                enemy.angle += (Math.random() - 0.5) * 0.2;
+                let nextEX = eHead.x + Math.cos(enemy.angle) * enemy.speed;
+                let nextEY = eHead.y + Math.sin(enemy.angle) * enemy.speed;
+                
+                if (nextEX < 50 || nextEX > FIELD_WIDTH - 50 || nextEY < 50 || nextEY > FIELD_HEIGHT - 50) {
+                    enemy.angle += Math.PI;
+                }
+                enemy.body.unshift({ x: nextEX, y: nextEY });
+                enemy.body.pop();
+
+                // 描画
+                for (let i = enemy.body.length - 1; i >= 0; i--) {
+                    ctx.fillStyle = enemy.col;
+                    ctx.beginPath();
+                    ctx.arc(enemy.body[i].x + camX, enemy.body[i].y + camY, i === 0 ? 13 : 8, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // COMの体に自分の頭が当たったら死亡
+                    if (i > 0) {
+                        if (Math.hypot(head.x - enemy.body[i].x, head.y - enemy.body[i].y) < headRadius * 0.8 + 8 * 0.8) {
+                            playerDied = true;
+                        }
+                    }
+                }
+
+                // COMの表示名
+                ctx.fillStyle = "#aaaaaa";
+                ctx.font = "12px sans-serif";
+                ctx.textAlign = "center";
+                ctx.fillText(enemy.name, enemy.body[0].x + camX, enemy.body[0].y + camY - 20);
+            });
+
+            if (playerDied) {
+                playSound('gameover');
+                gameState = "GAMEOVER";
+                return;
+            }
+
+            // 自分のヘビ描画
+            let myTemplate = skinTemplates[currentSkinIdx];
+            for (let i = snake.length - 1; i >= 0; i--) {
+                ctx.fillStyle = i === 0 ? myTemplate.head : myTemplate.body;
+                ctx.beginPath();
+                ctx.arc(snake[i].x + camX, snake[i].y + camY, i === 0 ? headRadius : bodyRadius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // 自分の名前表記
+            ctx.fillStyle = "#4ffaef";
+            ctx.font = "bold 13px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText(myPlayerName, head.x + camX, head.y + camY - 22);
+
+            // スコアUI
+            ctx.fillStyle = "rgba(15, 20, 35, 0.7)";
+            ctx.fillRect(15, 15, 180, 50);
+            ctx.fillStyle = "#4ffaef";
+            ctx.font = "bold 18px sans-serif";
+            ctx.textAlign = "left";
+            ctx.fillText(`SCORE: ${score}`, 25, 48);
+
+            // リーダーボード（順位）
+            let leaderboard = [];
+            if (gameMode === "ONLINE") {
+                leaderboard = Object.values(onlinePlayers).map(p => ({ name: p.name || "PLAYER", score: p.score || 0 }));
+            }
+            enemies.forEach(e => leaderboard.push({ name: e.name, score: e.enemyScore }));
+            leaderboard.push({ name: myPlayerName + " (YOU)", score: score });
+            leaderboard.sort((a, b) => b.score - a.score);
+
+            ctx.fillStyle = "rgba(15, 20, 35, 0.7)";
+            ctx.fillRect(canvas.width - 240, 20, 220, 150);
+            ctx.font = "bold 14px sans-serif";
+            ctx.fillStyle = "#4ffaef";
+            ctx.fillText(`順位表 (${gameMode})`, canvas.width - 230, 40);
+
+            for (let r = 0; r < Math.min(5, leaderboard.length); r++) {
+                let item = leaderboard[r];
+                ctx.fillStyle = item.name.includes("(YOU)") ? "#ff7da7" : "#ffffff";
+                let truncateName = item.name.length > 12 ? item.name.substring(0, 12) + ".." : item.name;
+                ctx.fillText(`${r + 1}. ${truncateName}`, canvas.width - 225, 65 + r * 20);
+                ctx.textAlign = "right";
+                ctx.fillText(item.score, canvas.width - 35, 65 + r * 20);
+                ctx.textAlign = "left";
+            }
+        }
+
+        function drawGameOverScreen() {
+            let cx = canvas.width / 2;
+            let cy = canvas.height / 2;
+            ctx.fillStyle = "rgba(5, 7, 18, 0.85)";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.textAlign = "center";
+            ctx.fillStyle = "#ff3366";
+            ctx.font = "bold 52px sans-serif";
+            ctx.fillText("GAME OVER", cx, cy - 40);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "bold 24px sans-serif";
+            ctx.fillText(`SCORE: ${score}`, cx, cy + 20);
+            ctx.font = "14px sans-serif";
+            ctx.fillText("画面をクリックしてメニューに戻る", cx, cy + 70);
+        }
+
+        function loop() {
+            if (gameState === "HOME") {
+                drawHomeScreen();
+            } else if (gameState === "PLAYING") {
+                updateAndDrawGameplay();
+            } else if (gameState === "GAMEOVER") {
+                drawGameOverScreen();
+            }
+            requestAnimationFrame(loop);
+        }
+
+        loop();
+    })();
+    </script>
+</body>
+</html>
